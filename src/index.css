@@ -1,0 +1,174 @@
+@import 'tailwindcss';
+
+/* Fonts — bundled (offline-ready) */
+@import '@fontsource-variable/plus-jakarta-sans';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/700.css';
+
+/*
+  "Buku Kas" — a warm digital ledger.
+  Paper cream surfaces, ink-dark text, warm amber accent,
+  emerald for credit/settled, rust for debt. Tabular mono numerals.
+*/
+@theme {
+  --color-paper: #fbf7f0;
+  --color-paper-2: #f4ecde;
+  --color-card: #fffdf8;
+  --color-ink: #211c17;
+  --color-ink-soft: #6f6557;
+  --color-ink-faint: #a89c89;
+  --color-line: #e7dcc8;
+  --color-line-strong: #d8c9ad;
+
+  --color-amber: #e0651a;
+  --color-amber-soft: #f4843e;
+  --color-emerald: #1f8a5b;
+  --color-emerald-soft: #e3f1e7;
+  --color-rust: #c0492f;
+  --color-rust-soft: #f7e4dc;
+
+  --font-display: 'Plus Jakarta Sans Variable', system-ui, sans-serif;
+  --font-sans: 'Plus Jakarta Sans Variable', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  --radius-card: 18px;
+
+  --shadow-card: 0 1px 2px rgba(33, 28, 23, 0.04),
+    0 8px 24px -12px rgba(33, 28, 23, 0.18);
+  --shadow-pop: 0 12px 40px -12px rgba(33, 28, 23, 0.32);
+}
+
+/*
+  Dark "Buku Kas" — warm near-black ledger. Tokens override the @theme vars
+  so every `bg-paper` / `text-ink` utility re-themes automatically. The
+  settle-up card stays cream-on-dark (bg-ink/text-paper invert) for a real
+  "paper receipt on a dark table" look.
+*/
+:root {
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-paper: #16120e;
+  --color-paper-2: #211a14;
+  --color-card: #211b15;
+  --color-ink: #f3ece0;
+  --color-ink-soft: #b3a896;
+  --color-ink-faint: #7d7160;
+  --color-line: #342b21;
+  --color-line-strong: #463a2c;
+
+  --color-amber: #f4843e;
+  --color-amber-soft: #f9a063;
+  --color-emerald: #34c98a;
+  --color-emerald-soft: #1d3328;
+  --color-rust: #e2734f;
+  --color-rust-soft: #3a221b;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 8px 24px -12px rgba(0, 0, 0, 0.6);
+  --shadow-pop: 0 12px 40px -12px rgba(0, 0, 0, 0.7);
+}
+
+[data-theme='dark'] body {
+  background-image:
+    radial-gradient(
+      120% 80% at 100% -10%,
+      rgba(244, 132, 62, 0.07),
+      transparent 60%
+    ),
+    radial-gradient(
+      90% 60% at -10% 0%,
+      rgba(52, 201, 138, 0.05),
+      transparent 55%
+    );
+}
+
+[data-theme='dark'] ::selection {
+  background: rgba(244, 132, 62, 0.28);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-paper);
+  /* layered warmth: soft amber bloom top-right + faint emerald bottom-left */
+  background-image:
+    radial-gradient(
+      120% 80% at 100% -10%,
+      rgba(224, 101, 26, 0.08),
+      transparent 60%
+    ),
+    radial-gradient(
+      90% 60% at -10% 0%,
+      rgba(31, 138, 91, 0.06),
+      transparent 55%
+    );
+  background-attachment: fixed;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* tabular figures everywhere numbers appear in mono */
+.font-mono {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+/* faint paper grain overlay */
+.grain::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+}
+
+/* perforated receipt edge — used on the settle-up summary */
+.perforated-top {
+  -webkit-mask-image: radial-gradient(
+    circle 7px at 12px -1px,
+    transparent 6px,
+    #000 6.5px
+  );
+  mask-image: radial-gradient(circle 7px at 12px -1px, transparent 6px, #000 6.5px);
+  -webkit-mask-size: 24px 100%;
+  mask-size: 24px 100%;
+  -webkit-mask-repeat: repeat-x;
+  mask-repeat: repeat-x;
+}
+
+input,
+button,
+textarea,
+select {
+  font-family: inherit;
+}
+
+::selection {
+  background: rgba(224, 101, 26, 0.2);
+}
+
+/* hide number input spinners */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
