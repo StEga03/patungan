@@ -11,8 +11,9 @@ export type Member = {
 export type Item = {
   id: string
   nama: string
-  harga: number // INTEGER rupiah
+  harga: number // INTEGER rupiah (gross, before `diskon`)
   pesertaId: string[] // who shares this item (≥1)
+  diskon?: Charge // per-item discount — borne only by this item's participants
 }
 
 export type SplitMode = 'rata' | 'item'
@@ -23,10 +24,22 @@ export type Charge = {
   nilai: number // percent (e.g. 11) or rupiah, by tipe
 }
 
+/** When a transaction-level discount is applied, relative to pajak & layanan. */
+export type DiskonBasis = 'sebelum' | 'setelah'
+
+/**
+ * A transaction-level discount. `basis` only matters in item mode:
+ *  - 'sebelum' (default) : discount cuts the subtotal, pajak/layanan are then
+ *                          computed on the discounted base (Indonesian receipt).
+ *  - 'setelah'           : pajak/layanan computed on the full subtotal, the
+ *                          discount is subtracted from the grand total.
+ */
+export type Discount = Charge & { basis?: DiskonBasis }
+
 export type Transaction = {
   id: string
   deskripsi: string
-  jumlah: number // INTEGER rupiah — total (for item mode: items + charges)
+  jumlah: number // INTEGER rupiah — gross, before `diskon` (item mode: items + charges)
   pembayarId: string
   pesertaId: string[] // ≥1 — for item mode: union of item participants
   dibuat: number // epoch ms (insertion order)
@@ -36,6 +49,8 @@ export type Transaction = {
   items?: Item[]
   pajak?: Charge // distributed proportionally to item subtotal
   layanan?: Charge // distributed proportionally to item subtotal
+  // --- discount (optional, works in BOTH modes) ---
+  diskon?: Discount // item mode: proportional to item subtotal; rata: cuts jumlah
 }
 
 export type Session = {

@@ -1,6 +1,15 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { CalendarDays, Check, Plus, Receipt, Users2, X, Zap } from 'lucide-react'
+import {
+  CalendarDays,
+  Check,
+  Plus,
+  Receipt,
+  Tag,
+  Users2,
+  X,
+  Zap,
+} from 'lucide-react'
 import { Avatar } from './ui/Avatar'
 import { Button } from './ui/Button'
 import { Card, CardHeader } from './ui/Card'
@@ -8,20 +17,33 @@ import { Label, TextInput } from './ui/TextInput'
 import { AmountInput } from './AmountInput'
 import { ItemEditor } from './ItemEditor'
 import { cn } from '@/lib/cn'
-import { chargeAmount } from '@/lib/calc'
+import { chargeAmount, discountAmount, itemNetto } from '@/lib/calc'
 import { todayStr } from '@/lib/date'
 import { digitsToNumber, evalAmount, formatRupiah, groupDigits } from '@/lib/money'
-import type { Charge, Item, Member, SplitMode, Transaction } from '@/lib/types'
+import type {
+  Charge,
+  DiskonBasis,
+  Item,
+  Member,
+  SplitMode,
+  Transaction,
+} from '@/lib/types'
 import type { NewTransaction } from '@/hooks/useStore'
 
 const PRESETS = ['🅿️ Parkir', '🚗 Bensin', '🛣️ E-toll', '🍽️ Makan', '🥤 Minum']
 
 /** Mutable form state for a charge (value kept as a raw string). */
 function useCharge(initial?: Charge) {
-  const [tipe, setTipe] = useState<Charge['tipe']>(initial?.tipe ?? 'persen')
+  const [tipe, setTipeState] = useState<Charge['tipe']>(initial?.tipe ?? 'persen')
   const [raw, setRaw] = useState(initial?.nilai ? String(initial.nilai) : '')
   const nilai = tipe === 'persen' ? Number(raw) || 0 : digitsToNumber(raw)
   const charge: Charge = { tipe, nilai }
+  // switching %/Rp clears the value — "20" percent is not "20" rupiah
+  const setTipe = (next: Charge['tipe']) => {
+    if (next === tipe) return
+    setTipeState(next)
+    setRaw('')
+  }
   return { tipe, setTipe, raw, setRaw, nilai, charge }
 }
 
@@ -68,23 +90,45 @@ export function AddTransaction({
   const [items, setItems] = useState<Item[]>(editing?.items ?? [])
   const pajak = useCharge(editing?.pajak)
   const layanan = useCharge(editing?.layanan)
+  const diskon = useCharge(editing?.diskon)
+  const [diskonBasis, setDiskonBasis] = useState<DiskonBasis>(
+    editing?.diskon?.basis ?? 'sebelum',
+  )
+  const [showDiskonRata, setShowDiskonRata] = useState(
+    !!editing?.diskon && editing.mode !== 'item',
+  )
 
   // ---- derived: item mode totals -----------------------------------------
   const validItems = items.filter((i) => i.harga > 0 && i.pesertaId.length > 0)
-  const subtotalAll = validItems.reduce((s, i) => s + i.harga, 0)
-  const pajakTotal = chargeAmount(pajak.charge, subtotalAll)
-  const layananTotal = chargeAmount(layanan.charge, subtotalAll)
-  const itemTotal = subtotalAll + pajakTotal + layananTotal
+  const subtotalBruto = validItems.reduce((s, i) => s + i.harga, 0)
+  const subtotalAll = validItems.reduce((s, i) => s + itemNetto(i), 0)
+  const diskonItemTotal = subtotalBruto - subtotalAll
+  // mirrors resolveTotals() in calc.ts
+  const itemAfterTax = diskonBasis === 'setelah'
+  const diskonBase = itemAfterTax
+    ? subtotalAll +
+      chargeAmount(pajak.charge, subtotalAll) +
+      chargeAmount(layanan.charge, subtotalAll)
+    : subtotalAll
+  const diskonTotal = discountAmount(diskon.charge, diskonBase)
+  const taxBase = itemAfterTax ? subtotalAll : subtotalAll - diskonTotal
+  const pajakTotal = chargeAmount(pajak.charge, taxBase)
+  const layananTotal = chargeAmount(layanan.charge, taxBase)
+  const itemTotal = itemAfterTax
+    ? subtotalAll + pajakTotal + layananTotal - diskonTotal
+    : taxBase + pajakTotal + layananTotal
 
   // ---- derived: rata mode --------------------------------------------------
   const jumlahRata = evalAmount(raw)
+  const diskonRata = discountAmount(diskon.charge, jumlahRata ?? 0)
+  const totalRata = (jumlahRata ?? 0) - diskonRata
 
   const valid =
     deskripsi.trim() &&
     pembayarId &&
     (mode === 'rata'
-      ? jumlahRata !== null && jumlahRata > 0 && pesertaId.length > 0
-      : validItems.length > 0)
+      ? jumlahRata !== null && totalRata > 0 && pesertaId.length > 0
+      : validItems.length > 0 && itemTotal > 0)
 
   const reset = () => {
     setMode('rata')
@@ -96,13 +140,23 @@ export function AddTransaction({
     setItems([])
     pajak.setRaw('')
     layanan.setRaw('')
+    diskon.setRaw('')
+    setDiskonBasis('sebelum')
+    setShowDiskonRata(false)
   }
 
   const submit = () => {
     if (!valid) return
     const base = { deskripsi: deskripsi.trim(), tanggal, pembayarId }
     if (mode === 'rata' && jumlahRata !== null) {
-      onSubmit({ ...base, jumlah: jumlahRata, pesertaId, mode: 'rata' })
+      onSubmit({
+        ...base,
+        jumlah: jumlahRata,
+        pesertaId,
+        mode: 'rata',
+        // basis is meaningless without pajak/layanan, so it isn't stored here
+        ...(diskon.nilai > 0 ? { diskon: diskon.charge } : {}),
+      })
     } else {
       const union = Array.from(new Set(validItems.flatMap((i) => i.pesertaId)))
       onSubmit({
@@ -113,6 +167,9 @@ export function AddTransaction({
         items: validItems,
         ...(pajak.nilai > 0 ? { pajak: pajak.charge } : {}),
         ...(layanan.nilai > 0 ? { layanan: layanan.charge } : {}),
+        ...(diskon.nilai > 0
+          ? { diskon: { ...diskon.charge, basis: diskonBasis } }
+          : {}),
       })
     }
     if (editing) onCancelEdit()
@@ -220,6 +277,43 @@ export function AddTransaction({
           <div>
             <Label htmlFor="amt">Amount</Label>
             <AmountInput id="amt" raw={raw} onRawChange={setRaw} />
+            {showDiskonRata ? (
+              <div className="mt-2.5">
+                <ChargeField
+                  label="Diskon"
+                  tipe={diskon.tipe}
+                  setTipe={diskon.setTipe}
+                  raw={diskon.raw}
+                  setRaw={diskon.setRaw}
+                />
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowDiskonRata(true)}
+                className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-amber hover:underline"
+              >
+                <Tag size={12} /> Tambah diskon
+              </button>
+            )}
+            {jumlahRata !== null && jumlahRata > 0 && diskonRata > 0 && (
+              <div className="mt-2 space-y-1 rounded-xl bg-paper-2 px-3.5 py-2.5 font-mono text-xs">
+                <div className="flex justify-between text-ink-soft">
+                  <span>Jumlah</span>
+                  <span>{formatRupiah(jumlahRata)}</span>
+                </div>
+                <div className="flex justify-between text-emerald">
+                  <span>
+                    Diskon
+                    {diskon.tipe === 'persen' ? ` ${diskon.nilai}%` : ''}
+                  </span>
+                  <span>−{formatRupiah(diskonRata)}</span>
+                </div>
+                <div className="flex justify-between border-t border-line pt-1 font-bold text-ink">
+                  <span>Total</span>
+                  <span>{formatRupiah(totalRata)}</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -294,14 +388,14 @@ export function AddTransaction({
                 )
               })}
             </div>
-            {pesertaId.length > 0 && jumlahRata && jumlahRata > 0 && (
+            {pesertaId.length > 0 && totalRata > 0 && (
               <motion.p
-                key={`${jumlahRata}-${pesertaId.length}`}
+                key={`${totalRata}-${pesertaId.length}`}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 className="mt-2 font-mono text-xs text-ink-soft"
               >
-                ≈ {formatRupiah(Math.floor(jumlahRata / pesertaId.length))} /
+                ≈ {formatRupiah(Math.floor(totalRata / pesertaId.length))} /
                 orang
               </motion.p>
             )}
@@ -331,17 +425,66 @@ export function AddTransaction({
                 setRaw={layanan.setRaw}
               />
             </div>
+            <div className="grid grid-cols-2 gap-2">
+              <ChargeField
+                label="Diskon"
+                tipe={diskon.tipe}
+                setTipe={diskon.setTipe}
+                raw={diskon.raw}
+                setRaw={diskon.setRaw}
+              />
+              {diskon.nilai > 0 && (pajak.nilai > 0 || layanan.nilai > 0) && (
+                <div>
+                  <Label>Diskon dihitung</Label>
+                  <div className="flex overflow-hidden rounded-xl border border-line">
+                    {(
+                      [
+                        ['sebelum', 'sebelum pajak'],
+                        ['setelah', 'setelah pajak'],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        key={value}
+                        onClick={() => setDiskonBasis(value)}
+                        className={cn(
+                          'flex-1 py-2 text-[11px] font-semibold transition-colors',
+                          diskonBasis === value
+                            ? 'bg-ink text-paper'
+                            : 'bg-paper-2 text-ink-soft',
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
             <p className="text-[11px] text-ink-faint">
-              Pajak &amp; layanan dibagi proporsional ke porsi pesanan tiap
-              orang.
+              Pajak, layanan &amp; diskon dibagi proporsional ke porsi pesanan
+              tiap orang. Diskon per item (🏷) cuma kena ke peserta item itu.
             </p>
 
-            {subtotalAll > 0 && (
+            {subtotalBruto > 0 && (
               <div className="space-y-1 rounded-xl bg-paper-2 px-3.5 py-2.5 font-mono text-xs">
                 <div className="flex justify-between text-ink-soft">
                   <span>Subtotal</span>
-                  <span>{formatRupiah(subtotalAll)}</span>
+                  <span>{formatRupiah(subtotalBruto)}</span>
                 </div>
+                {diskonItemTotal > 0 && (
+                  <div className="flex justify-between text-emerald">
+                    <span>Diskon item</span>
+                    <span>−{formatRupiah(diskonItemTotal)}</span>
+                  </div>
+                )}
+                {diskonTotal > 0 && !itemAfterTax && (
+                  <div className="flex justify-between text-emerald">
+                    <span>
+                      Diskon{diskon.tipe === 'persen' ? ` ${diskon.nilai}%` : ''}
+                    </span>
+                    <span>−{formatRupiah(diskonTotal)}</span>
+                  </div>
+                )}
                 {pajakTotal > 0 && (
                   <div className="flex justify-between text-ink-soft">
                     <span>Pajak</span>
@@ -352,6 +495,14 @@ export function AddTransaction({
                   <div className="flex justify-between text-ink-soft">
                     <span>Layanan</span>
                     <span>{formatRupiah(layananTotal)}</span>
+                  </div>
+                )}
+                {diskonTotal > 0 && itemAfterTax && (
+                  <div className="flex justify-between text-emerald">
+                    <span>
+                      Diskon{diskon.tipe === 'persen' ? ` ${diskon.nilai}%` : ''}
+                    </span>
+                    <span>−{formatRupiah(diskonTotal)}</span>
                   </div>
                 )}
                 <div className="flex justify-between border-t border-line pt-1 font-bold text-ink">

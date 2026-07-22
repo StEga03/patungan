@@ -2,6 +2,7 @@ import type {
   Balance,
   Breakdown,
   Charge,
+  Item,
   Member,
   Payment,
   Transaction,
@@ -24,12 +25,13 @@ export function memberInUse(id: string, transaksi: Transaction[]): boolean {
 }
 
 /**
- * Resolve a transaction into its effective total `jumlah` and the integer
- * amount each member owes. Works for both split modes:
+ * Resolve a transaction into its effective total `jumlah` (AFTER discounts) and
+ * the integer amount each member owes. Works for both split modes:
  *
- *  - 'rata'  : jumlah split equally among participants.
- *  - 'item'  : each item split among its own participants; the extra charge
- *              (pajak + service) is distributed PROPORTIONALLY to each
+ *  - 'rata'  : jumlah (minus discount) split equally among participants.
+ *  - 'item'  : each item split among its own participants; item discounts cut
+ *              that item only, while the transaction discount and the extra
+ *              charge (pajak + service) are distributed PROPORTIONALLY to each
  *              member's item subtotal.
  *
  * Rounding remainders are NOT forced here — `computeBalances` charges the
@@ -42,37 +44,29 @@ export function resolveTransaction(
   const owed = new Map<string, number>()
 
   if (t.mode === 'item' && t.items && t.items.length > 0) {
-    // per-person item subtotal
-    const subtotal = new Map<string, number>()
-    let subtotalAll = 0
-    for (const item of t.items) {
-      const peserta = item.pesertaId.filter((id) => valid.has(id))
-      if (peserta.length === 0 || item.harga <= 0) continue
-      subtotalAll += item.harga
-      const share = item.harga / peserta.length
-      for (const id of peserta) {
-        subtotal.set(id, (subtotal.get(id) ?? 0) + share)
-      }
-    }
+    const { perMember, subtotalAll } = itemSubtotals(t, valid)
     if (subtotalAll <= 0) return { jumlah: 0, owed }
 
-    const tambahan = computeTambahan(t, subtotalAll)
-    const jumlah = subtotalAll + tambahan
+    const { total } = resolveTotals(t, subtotalAll)
+    if (total <= 0) return { jumlah: 0, owed }
 
-    for (const [id, sub] of subtotal) {
-      const extra = subtotalAll > 0 ? (tambahan * sub) / subtotalAll : 0
-      owed.set(id, Math.round(sub + extra))
+    // pajak/layanan/diskon are all proportional to the netto subtotal, so a
+    // member's share is simply their slice of the final total.
+    for (const [id, sub] of perMember) {
+      owed.set(id, Math.round((total * sub) / subtotalAll))
     }
-    return { jumlah, owed }
+    return { jumlah: total, owed }
     // (rounding leftover reconciled by computeBalances via the payer)
   }
 
   // 'rata' mode (default)
   const peserta = t.pesertaId.filter((id) => valid.has(id))
-  if (peserta.length === 0 || t.jumlah <= 0) return { jumlah: 0, owed }
-  const share = Math.floor(t.jumlah / peserta.length)
+  const bruto = Math.max(0, t.jumlah)
+  const total = bruto - discountAmount(t.diskon, bruto)
+  if (peserta.length === 0 || total <= 0) return { jumlah: 0, owed }
+  const share = Math.floor(total / peserta.length)
   for (const id of peserta) owed.set(id, share)
-  return { jumlah: t.jumlah, owed }
+  return { jumlah: total, owed }
 }
 
 /** Amount of one charge (percent of subtotal or absolute rupiah). */
@@ -87,22 +81,88 @@ export function chargeAmount(
   return Math.round(charge.nilai)
 }
 
-/** Total extra charge (pajak + layanan) in rupiah for a per-item transaction. */
-export function computeTambahan(t: Transaction, subtotalAll: number): number {
-  return (
-    chargeAmount(t.pajak, subtotalAll) + chargeAmount(t.layanan, subtotalAll)
-  )
+/**
+ * Amount of one discount in rupiah, CLAMPED to `0..base` — a discount can never
+ * push a total below zero (that's the only difference from `chargeAmount`).
+ */
+export function discountAmount(
+  diskon: Charge | undefined,
+  base: number,
+): number {
+  if (!diskon || diskon.nilai <= 0 || base <= 0) return 0
+  const raw =
+    diskon.tipe === 'persen'
+      ? Math.round((base * diskon.nilai) / 100)
+      : Math.round(diskon.nilai)
+  return Math.min(Math.max(raw, 0), base)
 }
 
-/** Effective total of a transaction (recomputed for item mode). */
+/** One item's price after its own discount (never negative). */
+export function itemNetto(item: Item): number {
+  const harga = Math.max(0, item.harga)
+  return harga - discountAmount(item.diskon, harga)
+}
+
+/**
+ * Netto item subtotal per member (fractional) and in total, for an item-mode
+ * transaction. Items with no (valid) participant or a non-positive gross price
+ * are skipped. `valid` limits participants to existing members; omit to accept
+ * every listed participant.
+ */
+export function itemSubtotals(
+  t: Transaction,
+  valid?: Set<string>,
+): { perMember: Map<string, number>; subtotalAll: number } {
+  const perMember = new Map<string, number>()
+  let subtotalAll = 0
+  for (const item of t.items ?? []) {
+    const peserta = valid
+      ? item.pesertaId.filter((id) => valid.has(id))
+      : item.pesertaId
+    if (peserta.length === 0 || item.harga <= 0) continue
+    const netto = itemNetto(item)
+    subtotalAll += netto
+    const share = netto / peserta.length
+    for (const id of peserta) {
+      perMember.set(id, (perMember.get(id) ?? 0) + share)
+    }
+  }
+  return { perMember, subtotalAll }
+}
+
+/**
+ * Turn a netto item subtotal into the final total, applying the transaction
+ * discount either before or after pajak & layanan (see `DiskonBasis`).
+ */
+export function resolveTotals(
+  t: Transaction,
+  subtotalAll: number,
+): { base: number; diskon: number; tambahan: number; total: number } {
+  if ((t.diskon?.basis ?? 'sebelum') === 'setelah') {
+    const tambahan = computeTambahan(t, subtotalAll)
+    const bruto = subtotalAll + tambahan
+    const diskon = discountAmount(t.diskon, bruto)
+    return { base: subtotalAll, diskon, tambahan, total: bruto - diskon }
+  }
+  const diskon = discountAmount(t.diskon, subtotalAll)
+  const base = subtotalAll - diskon
+  const tambahan = computeTambahan(t, base)
+  return { base, diskon, tambahan, total: base + tambahan }
+}
+
+/** Total extra charge (pajak + layanan) in rupiah, computed on `base`. */
+export function computeTambahan(t: Transaction, base: number): number {
+  return chargeAmount(t.pajak, base) + chargeAmount(t.layanan, base)
+}
+
+/** Effective total of a transaction, after every discount. */
 export function transactionTotal(t: Transaction): number {
   if (t.mode === 'item' && t.items && t.items.length > 0) {
-    const subtotalAll = t.items
-      .filter((i) => i.pesertaId.length > 0 && i.harga > 0)
-      .reduce((s, i) => s + i.harga, 0)
-    return subtotalAll + computeTambahan(t, subtotalAll)
+    const { subtotalAll } = itemSubtotals(t)
+    return resolveTotals(t, subtotalAll).total
   }
-  return Math.max(0, t.jumlah)
+  const bruto = Math.max(0, t.jumlah)
+  return bruto - discountAmount(t.diskon, bruto)
 }
 
 /**
@@ -190,6 +250,7 @@ export type MemberLedger = {
 }
 
 const SHARED_CHARGE_NOTE = 'pajak/layanan proporsional'
+const SHARED_DISCOUNT_NOTE = 'diskon proporsional'
 
 /** Build the per-transaction note explaining a member's share in one item-mode tx. */
 function itemModeNote(t: Transaction, memberId: string): string {
@@ -197,11 +258,14 @@ function itemModeNote(t: Transaction, memberId: string): string {
   for (const item of t.items ?? []) {
     if (!item.pesertaId.includes(memberId) || item.harga <= 0) continue
     const n = item.pesertaId.length
-    parts.push(n > 1 ? `${item.nama || 'Item'} (patungan ${n})` : item.nama || 'Item')
+    const label = item.nama || 'Item'
+    const diskon = (item.diskon?.nilai ?? 0) > 0 ? ' − diskon' : ''
+    parts.push(n > 1 ? `${label} (patungan ${n})${diskon}` : `${label}${diskon}`)
   }
   const hasCharge =
     (t.pajak?.nilai ?? 0) > 0 || (t.layanan?.nilai ?? 0) > 0
   if (hasCharge) parts.push(SHARED_CHARGE_NOTE)
+  if ((t.diskon?.nilai ?? 0) > 0) parts.push(SHARED_DISCOUNT_NOTE)
   return parts.join(' + ') || 'item'
 }
 
@@ -246,6 +310,7 @@ export function computeMemberLedger(
     } else {
       const n = t.pesertaId.filter((id) => valid.has(id)).length
       note = `bagi rata ${n} orang`
+      if ((t.diskon?.nilai ?? 0) > 0) note += ' (setelah diskon)'
     }
     if (remainder !== 0) note += ' + sisa pembulatan'
     used.push({ txId: t.id, deskripsi: t.deskripsi, amount, note })

@@ -4,6 +4,9 @@ import { Avatar } from './ui/Avatar'
 import { Button } from './ui/Button'
 import {
   chargeAmount,
+  itemNetto,
+  itemSubtotals,
+  resolveTotals,
   resolveTransaction,
   transactionTotal,
 } from '@/lib/calc'
@@ -34,11 +37,20 @@ export function TransactionDetail({
     : { owed: new Map<string, number>() }
   const total = t ? transactionTotal(t) : 0
 
-  const subtotalAll =
+  const subtotalBruto =
     t?.items?.reduce(
       (s, i) => (i.pesertaId.length > 0 && i.harga > 0 ? s + i.harga : s),
       0,
     ) ?? 0
+  const subtotalAll = t ? itemSubtotals(t).subtotalAll : 0
+  const diskonItemTotal = subtotalBruto - subtotalAll
+  const totals = t
+    ? resolveTotals(t, subtotalAll)
+    : { base: 0, diskon: 0, tambahan: 0, total: 0 }
+  const afterTax = (t?.diskon?.basis ?? 'sebelum') === 'setelah'
+  const taxBase = afterTax ? subtotalAll : totals.base
+  const diskonRata =
+    t && t.mode !== 'item' ? Math.max(0, t.jumlah) - total : 0
 
   return (
     <Sheet open={!!t} onClose={onClose} title="Detail transaksi">
@@ -82,46 +94,116 @@ export function TransactionDetail({
                 Pesanan
               </p>
               <div className="space-y-1.5">
-                {t.items.map((it) => (
-                  <div
-                    key={it.id}
-                    className="rounded-lg border border-line bg-paper/50 px-3 py-2"
-                  >
-                    <div className="flex justify-between font-medium text-ink">
-                      <span>{it.nama || 'Item'}</span>
-                      <span className="font-mono">{formatRupiah(it.harga)}</span>
+                {t.items.map((it) => {
+                  const netto = itemNetto(it)
+                  const potongan = Math.max(0, it.harga) - netto
+                  return (
+                    <div
+                      key={it.id}
+                      className="rounded-lg border border-line bg-paper/50 px-3 py-2"
+                    >
+                      <div className="flex justify-between font-medium text-ink">
+                        <span>{it.nama || 'Item'}</span>
+                        <span className="font-mono">
+                          {potongan > 0 && (
+                            <span className="mr-1.5 text-ink-faint line-through">
+                              {formatRupiah(it.harga)}
+                            </span>
+                          )}
+                          {formatRupiah(netto)}
+                        </span>
+                      </div>
+                      {potongan > 0 && (
+                        <p className="mt-0.5 font-mono text-[11px] text-emerald">
+                          diskon
+                          {it.diskon?.tipe === 'persen'
+                            ? ` ${it.diskon.nilai}%`
+                            : ''}{' '}
+                          −{formatRupiah(potongan)}
+                        </p>
+                      )}
+                      <p className="mt-0.5 text-xs text-ink-soft">
+                        {it.pesertaId.map(nameOf).join(', ')} ·{' '}
+                        <span className="font-mono">
+                          {formatRupiah(
+                            Math.floor(netto / Math.max(1, it.pesertaId.length)),
+                          )}
+                          /org
+                        </span>
+                      </p>
                     </div>
-                    <p className="mt-0.5 text-xs text-ink-soft">
-                      {it.pesertaId.map(nameOf).join(', ')} ·{' '}
-                      <span className="font-mono">
-                        {formatRupiah(
-                          Math.floor(it.harga / Math.max(1, it.pesertaId.length)),
-                        )}
-                        /org
-                      </span>
-                    </p>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
-              {(t.pajak || t.layanan) && (
-                <div className="mt-2 space-y-1 font-mono text-xs text-ink-soft">
-                  {t.pajak && t.pajak.nilai > 0 && (
-                    <div className="flex justify-between">
-                      <span>Pajak{t.pajak.tipe === 'persen' ? ` ${t.pajak.nilai}%` : ''}</span>
-                      <span>{formatRupiah(chargeAmount(t.pajak, subtotalAll))}</span>
-                    </div>
-                  )}
-                  {t.layanan && t.layanan.nilai > 0 && (
-                    <div className="flex justify-between">
-                      <span>
-                        Layanan
-                        {t.layanan.tipe === 'persen' ? ` ${t.layanan.nilai}%` : ''}
-                      </span>
-                      <span>{formatRupiah(chargeAmount(t.layanan, subtotalAll))}</span>
-                    </div>
-                  )}
+              <div className="mt-2 space-y-1 font-mono text-xs text-ink-soft">
+                <div className="flex justify-between">
+                  <span>Subtotal</span>
+                  <span>{formatRupiah(subtotalBruto)}</span>
                 </div>
-              )}
+                {diskonItemTotal > 0 && (
+                  <div className="flex justify-between text-emerald">
+                    <span>Diskon item</span>
+                    <span>−{formatRupiah(diskonItemTotal)}</span>
+                  </div>
+                )}
+                {totals.diskon > 0 && !afterTax && (
+                  <div className="flex justify-between text-emerald">
+                    <span>
+                      Diskon
+                      {t.diskon?.tipe === 'persen' ? ` ${t.diskon.nilai}%` : ''}
+                    </span>
+                    <span>−{formatRupiah(totals.diskon)}</span>
+                  </div>
+                )}
+                {t.pajak && t.pajak.nilai > 0 && (
+                  <div className="flex justify-between">
+                    <span>Pajak{t.pajak.tipe === 'persen' ? ` ${t.pajak.nilai}%` : ''}</span>
+                    <span>{formatRupiah(chargeAmount(t.pajak, taxBase))}</span>
+                  </div>
+                )}
+                {t.layanan && t.layanan.nilai > 0 && (
+                  <div className="flex justify-between">
+                    <span>
+                      Layanan
+                      {t.layanan.tipe === 'persen' ? ` ${t.layanan.nilai}%` : ''}
+                    </span>
+                    <span>{formatRupiah(chargeAmount(t.layanan, taxBase))}</span>
+                  </div>
+                )}
+                {totals.diskon > 0 && afterTax && (
+                  <div className="flex justify-between text-emerald">
+                    <span>
+                      Diskon
+                      {t.diskon?.tipe === 'persen' ? ` ${t.diskon.nilai}%` : ''}
+                    </span>
+                    <span>−{formatRupiah(totals.diskon)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between border-t border-line pt-1 font-bold text-ink">
+                  <span>Total</span>
+                  <span>{formatRupiah(total)}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* rata mode discount recap */}
+          {t.mode !== 'item' && diskonRata > 0 && (
+            <div className="space-y-1 font-mono text-xs text-ink-soft">
+              <div className="flex justify-between">
+                <span>Jumlah</span>
+                <span>{formatRupiah(t.jumlah)}</span>
+              </div>
+              <div className="flex justify-between text-emerald">
+                <span>
+                  Diskon{t.diskon?.tipe === 'persen' ? ` ${t.diskon.nilai}%` : ''}
+                </span>
+                <span>−{formatRupiah(diskonRata)}</span>
+              </div>
+              <div className="flex justify-between border-t border-line pt-1 font-bold text-ink">
+                <span>Total</span>
+                <span>{formatRupiah(total)}</span>
+              </div>
             </div>
           )}
 

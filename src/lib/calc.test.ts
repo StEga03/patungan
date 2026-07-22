@@ -330,3 +330,181 @@ describe('recorded payments (concern #4: paid stays paid as new tx pile up)', ()
     expect(after.total).toBe(before.total)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Diskon
+// ---------------------------------------------------------------------------
+
+const itemTx = (over: Partial<Transaction> = {}): Transaction => ({
+  id: 'cafe',
+  deskripsi: 'Cafe',
+  jumlah: 0,
+  pembayarId: 'b',
+  pesertaId: ['b', 'a'],
+  dibuat: 0,
+  mode: 'item',
+  items: [
+    { id: 'i1', nama: 'Kopi', harga: 60_000, pesertaId: ['b'] },
+    { id: 'i2', nama: 'Teh', harga: 40_000, pesertaId: ['a'] },
+  ],
+  ...over,
+})
+
+describe('diskon — mode rata', () => {
+  const anggota = [budi, ani, citra]
+
+  it('potong rupiah dari jumlah lalu dibagi rata', () => {
+    const t: Transaction = {
+      ...tx('t', 200_000, 'b', ['b', 'a', 'c']),
+      diskon: { tipe: 'rupiah', nilai: 50_000 },
+    }
+    expect(transactionTotal(t)).toBe(150_000)
+    const { jumlah, owed } = resolveTransaction(t, new Set(['b', 'a', 'c']))
+    expect(jumlah).toBe(150_000)
+    expect(owed.get('a')).toBe(50_000)
+    expect(computeBalances(anggota, [t]).reduce((s, x) => s + x.nilai, 0)).toBe(0)
+  })
+
+  it('potong persen dari jumlah', () => {
+    const t: Transaction = {
+      ...tx('t', 200_000, 'b', ['b', 'a']),
+      diskon: { tipe: 'persen', nilai: 25 },
+    }
+    expect(transactionTotal(t)).toBe(150_000)
+    expect(resolveTransaction(t, new Set(['b', 'a'])).owed.get('a')).toBe(75_000)
+  })
+
+  it('diskon lebih besar dari jumlah di-clamp ke total 0', () => {
+    const t: Transaction = {
+      ...tx('t', 100_000, 'b', ['b', 'a']),
+      diskon: { tipe: 'rupiah', nilai: 500_000 },
+    }
+    expect(transactionTotal(t)).toBe(0)
+    expect(resolveTransaction(t, new Set(['b', 'a'])).jumlah).toBe(0)
+    expect(computeBalances(anggota, [t]).every((x) => x.nilai === 0)).toBe(true)
+  })
+})
+
+describe('diskon — mode item', () => {
+  const anggota = [budi, ani]
+  const valid = new Set(['b', 'a'])
+
+  it('diskon per item cuma kena ke peserta item itu', () => {
+    const t = itemTx({
+      items: [
+        {
+          id: 'i1',
+          nama: 'Kopi',
+          harga: 60_000,
+          pesertaId: ['b'],
+          diskon: { tipe: 'persen', nilai: 50 },
+        },
+        { id: 'i2', nama: 'Teh', harga: 40_000, pesertaId: ['a'] },
+      ],
+    })
+    expect(transactionTotal(t)).toBe(70_000)
+    const { owed } = resolveTransaction(t, valid)
+    expect(owed.get('b')).toBe(30_000)
+    expect(owed.get('a')).toBe(40_000) // tidak terpengaruh
+  })
+
+  it('diskon transaksi basis "sebelum" — pajak & layanan dari harga diskon', () => {
+    const t = itemTx({
+      pajak: { tipe: 'persen', nilai: 11 },
+      layanan: { tipe: 'persen', nilai: 5 },
+      diskon: { tipe: 'persen', nilai: 20, basis: 'sebelum' },
+    })
+    expect(transactionTotal(t)).toBe(92_800)
+  })
+
+  it('diskon transaksi basis "setelah" — pajak & layanan dari subtotal penuh', () => {
+    const t = itemTx({
+      pajak: { tipe: 'persen', nilai: 11 },
+      layanan: { tipe: 'persen', nilai: 5 },
+      diskon: { tipe: 'rupiah', nilai: 20_000, basis: 'setelah' },
+    })
+    expect(transactionTotal(t)).toBe(96_000)
+
+    const sebelum = itemTx({
+      pajak: { tipe: 'persen', nilai: 11 },
+      layanan: { tipe: 'persen', nilai: 5 },
+      diskon: { tipe: 'rupiah', nilai: 20_000, basis: 'sebelum' },
+    })
+    expect(transactionTotal(sebelum)).toBe(92_800)
+  })
+
+  it('basis absen dianggap "sebelum"', () => {
+    const t = itemTx({
+      pajak: { tipe: 'persen', nilai: 11 },
+      diskon: { tipe: 'rupiah', nilai: 20_000 },
+    })
+    expect(transactionTotal(t)).toBe(88_800) // (100k−20k) + 11%
+  })
+
+  it('diskon item + diskon transaksi berlapis, proporsional ke porsi', () => {
+    const t = itemTx({
+      items: [
+        {
+          id: 'i1',
+          nama: 'Kopi',
+          harga: 60_000,
+          pesertaId: ['b'],
+          diskon: { tipe: 'rupiah', nilai: 20_000 },
+        },
+        { id: 'i2', nama: 'Teh', harga: 40_000, pesertaId: ['a'] },
+      ],
+      diskon: { tipe: 'persen', nilai: 10 },
+    })
+    // netto 40k + 40k = 80k, diskon 10% -> 72k
+    expect(transactionTotal(t)).toBe(72_000)
+    const { owed } = resolveTransaction(t, valid)
+    expect(owed.get('b')).toBe(36_000)
+    expect(owed.get('a')).toBe(36_000)
+  })
+
+  it('diskon 100% membuat transaksi tidak mempengaruhi saldo', () => {
+    const t = itemTx({ diskon: { tipe: 'persen', nilai: 100 } })
+    expect(transactionTotal(t)).toBe(0)
+    expect(resolveTransaction(t, valid).owed.size).toBe(0)
+    expect(computeBalances(anggota, [t]).every((x) => x.nilai === 0)).toBe(true)
+  })
+
+  it('sisa pembulatan tetap ditanggung pembayar (Σ saldo = 0)', () => {
+    const t = itemTx({
+      items: [
+        { id: 'i1', nama: 'Sate', harga: 33_333, pesertaId: ['b', 'a'] },
+        { id: 'i2', nama: 'Es', harga: 10_001, pesertaId: ['a'] },
+      ],
+      pajak: { tipe: 'persen', nilai: 11 },
+      diskon: { tipe: 'persen', nilai: 7, basis: 'sebelum' },
+    })
+    const { jumlah, owed } = resolveTransaction(t, valid)
+    const owedSum = Array.from(owed.values()).reduce((s, v) => s + v, 0)
+    expect(jumlah - owedSum).toBeLessThanOrEqual(2)
+    expect(computeBalances(anggota, [t]).reduce((s, x) => s + x.nilai, 0)).toBe(0)
+  })
+
+  it('ledger tiap orang konsisten dengan breakdown & nyebut diskon', () => {
+    const t = itemTx({
+      items: [
+        {
+          id: 'i1',
+          nama: 'Kopi',
+          harga: 60_000,
+          pesertaId: ['b'],
+          diskon: { tipe: 'persen', nilai: 50 },
+        },
+        { id: 'i2', nama: 'Teh', harga: 40_000, pesertaId: ['a'] },
+      ],
+      diskon: { tipe: 'persen', nilai: 10 },
+    })
+    const breakdown = computeBreakdown(anggota, [t])
+    for (const b of breakdown) {
+      const ledger = computeMemberLedger(b.memberId, anggota, [t])
+      expect(ledger.totalUsed).toBe(b.tanggungan)
+      expect(ledger.totalPaid).toBe(b.dibayar)
+    }
+    const budiLedger = computeMemberLedger('b', anggota, [t])
+    expect(budiLedger.used[0].note).toContain('diskon')
+  })
+})
